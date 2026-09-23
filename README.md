@@ -539,7 +539,7 @@ Still being refined:
 
 ## License
 
-Choose a license appropriate for your repository. MIT is a common choice for ESPHome configuration projects.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ## Acknowledgements
 
