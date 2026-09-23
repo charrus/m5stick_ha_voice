@@ -6,6 +6,8 @@ This project uses the StickS3’s onboard microphone, speaker, ES8311 audio code
 
 > Tested during development with **ESPHome 2026.9.0**.
 
+<img width="949" height="951" alt="image" src="https://github.com/user-attachments/assets/536d5e49-5646-4e93-a155-34729cb2572e" />
+
 ## Features
 
 - Home Assistant Assist voice input
