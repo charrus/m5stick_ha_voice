@@ -1,0 +1,488 @@
+substitutions:
+  name: m5sticks3-voice
+  friendly_name: "M5StickS3 Voice"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    # I2C itself starts at priority 1000.
+    # ES8311 uses the normal component priority around 600.
+    # So 850 puts the PMIC setup between them.
+    - priority: 850
+      then:
+        - lambda: |-
+            ESP_LOGI("sticks3_power", "Initialising M5PM1 audio power");
+
+            // M5PM1 can NAK its first transaction after I2C sleep,
+            // so retry reads/writes a few times.
+            auto read_reg = [&](uint8_t reg, uint8_t &value) -> bool {
+              for (int i = 0; i < 3; i++) {
+                auto result = id(m5pm1).read_byte(reg);
+                if (result.has_value()) {
+                  value = result.value();
+                  return true;
+                }
+                esphome::delay(5);
+              }
+              return false;
+            };
+
+            auto write_reg = [&](uint8_t reg, uint8_t value) -> bool {
+              for (int i = 0; i < 3; i++) {
+                if (id(m5pm1).write_byte(reg, value)) {
+                  return true;
+                }
+                esphome::delay(5);
+              }
+              return false;
+            };
+
+            auto update_reg =
+                [&](uint8_t reg, uint8_t mask, bool set) -> bool {
+              uint8_t value;
+
+              if (!read_reg(reg, value)) {
+                ESP_LOGE(
+                  "sticks3_power",
+                  "Unable to read M5PM1 register 0x%02X",
+                  reg
+                );
+                return false;
+              }
+
+              if (set) {
+                value |= mask;
+              } else {
+                value &= ~mask;
+              }
+
+              if (!write_reg(reg, value)) {
+                ESP_LOGE(
+                  "sticks3_power",
+                  "Unable to write M5PM1 register 0x%02X",
+                  reg
+                );
+                return false;
+              }
+
+              return true;
+            };
+
+            // Confirm PMIC
+            uint8_t device_id = 0;
+
+            if (!read_reg(0x00, device_id)) {
+              ESP_LOGE(
+                "sticks3_power",
+                "M5PM1 did not respond"
+              );
+              return;
+            }
+
+            ESP_LOGI(
+              "sticks3_power",
+              "M5PM1 detected, ID=0x%02X",
+              device_id
+            );
+
+            // Disable M5PM1 I2C idle sleep.
+            // This is also done by M5Stack's M5PM1::begin().
+            write_reg(0x09, 0x00);
+
+            // Disable PMIC watchdog
+            write_reg(0x0A, 0x00);
+
+            // -------------------------------------------------
+            // PYG2 -> L3B power rail
+            //
+            // GPIO2 function field = bits 5:4 in GPIO_FUNC0.
+            // 00 = ordinary GPIO.
+            // -------------------------------------------------
+
+            // GPIO2 -> ordinary GPIO
+            if (!update_reg(0x16, 0x30, false)) return;
+
+            // GPIO2 -> output
+            if (!update_reg(0x10, 0x04, true)) return;
+
+            // GPIO2 -> push-pull
+            if (!update_reg(0x13, 0x04, false)) return;
+
+            // GPIO2 HIGH -> L3B ON
+            if (!update_reg(0x11, 0x04, true)) return;
+
+            ESP_LOGI(
+              "sticks3_power",
+              "L3B enabled - powering ES8311"
+            );
+
+            // Give the rail and codec time to stabilise.
+            esphome::delay(100);
+
+            // Check that the ES8311 now answers.
+            auto codec = id(es8311_probe).read_byte(0x00);
+
+            if (codec.has_value()) {
+              ESP_LOGI(
+                "sticks3_power",
+                "ES8311 now responds at 0x18, REG00=0x%02X",
+                codec.value()
+              );
+            } else {
+              ESP_LOGE(
+                "sticks3_power",
+                "ES8311 still not responding after enabling L3B"
+              );
+            }
+
+            // -------------------------------------------------
+            // Configure PYG3 for the AW8737 speaker amplifier,
+            // but leave it OFF until after the codec starts.
+            // -------------------------------------------------
+
+            // GPIO3 function field = bits 7:6
+            update_reg(0x16, 0xC0, false);
+
+            // GPIO3 -> output
+            update_reg(0x10, 0x08, true);
+
+            // GPIO3 -> push-pull
+            update_reg(0x13, 0x08, false);
+
+            // Initially amplifier OFF
+            update_reg(0x11, 0x08, false);
+
+    # This runs after the normal ES8311 setup.
+    - priority: 500
+      then:
+        - lambda: |-
+            auto value = id(m5pm1).read_byte(0x11);
+
+            if (value.has_value()) {
+              if (id(m5pm1).write_byte(
+                    0x11,
+                    value.value() | 0x08
+                  )) {
+                ESP_LOGI(
+                  "sticks3_power",
+                  "Speaker amplifier enabled"
+                );
+              }
+            }
+
+    - priority: -100
+      then:
+        - audio_dac.set_volume:
+            id: es8311_dac
+            volume: 65%
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  id: ha_api
+  encryption:
+    key: !secret ha_api_pw
+
+ota:
+  - platform: esphome
+    password: !secret ota_pw
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "M5StickS3 Fallback"
+
+captive_portal:
+
+network:
+  tcp_send_buffer: 32kB
+
+# ---------------------------------------------------------
+# I2C
+# ES8311 codec and M5PM1 power controller
+# ---------------------------------------------------------
+
+i2c:
+  id: internal_i2c
+  sda: GPIO47
+  scl: GPIO48
+  frequency: 100kHz
+  scan: true
+
+i2c_device:
+  # M5PM1 power-management IC
+  - id: m5pm1
+    i2c_id: internal_i2c
+    address: 0x6E
+
+  # Used only to verify that the codec has powered up
+  - id: es8311_probe
+    i2c_id: internal_i2c
+    address: 0x18
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+
+i2s_audio:
+  # Microphone controller
+  - id: i2s_input
+
+    i2s_lrclk_pin:
+      number: GPIO15
+      allow_other_uses: true
+
+    i2s_bclk_pin:
+      number: GPIO17
+      allow_other_uses: true
+
+    i2s_mclk_pin:
+      number: GPIO18
+      allow_other_uses: true
+
+
+  # Speaker controller
+  - id: i2s_output
+
+    i2s_lrclk_pin:
+      number: GPIO15
+      allow_other_uses: true
+
+    i2s_bclk_pin:
+      number: GPIO17
+      allow_other_uses: true
+
+    i2s_mclk_pin:
+      number: GPIO18
+      allow_other_uses: true
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    address: 0x18
+    i2c_id: internal_i2c
+    use_mclk: true
+    use_microphone: false
+    sample_rate: 16000
+    bits_per_sample: 16bit
+
+
+microphone:
+  - platform: i2s_audio
+    id: sticks3_microphone
+    i2s_audio_id: i2s_input
+
+    i2s_din_pin: GPIO16
+    adc_type: external
+    pdm: false
+
+    i2s_mode: primary
+
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    channel: left
+
+    mclk_multiple: 256
+
+
+speaker:
+  - platform: i2s_audio
+    id: sticks3_speaker
+    i2s_audio_id: i2s_output
+
+    i2s_dout_pin: GPIO14
+    dac_type: external
+    audio_dac: es8311_dac
+
+    i2s_mode: primary
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    channel: left
+
+    buffer_duration: 500ms
+    timeout: 1s
+
+# media_player:
+#   - platform: speaker
+#     id: voice_media_player
+
+#     buffer_size: 100000
+#     task_stack_in_psram: true
+
+#     announcement_pipeline:
+#       speaker: sticks3_speaker
+#       format: WAV
+#       sample_rate: 16000
+#       num_channels: 1
+
+# ---------------------------------------------------------
+# WAKE WORD
+# ---------------------------------------------------------
+
+# micro_wake_word:
+#   id: mww
+
+# microphone:
+#     microphone: sticks3_microphone
+#     gain_factor: 4
+
+# vad:
+
+#   models:
+#     - model: okay_nabu
+#     - model: hey_jarvis
+
+#   on_wake_word_detected:
+#     - voice_assistant.start:
+#         wake_word: !lambda return wake_word;
+
+# ---------------------------------------------------------
+# HOME ASSISTANT VOICE ASSIST
+# ---------------------------------------------------------
+
+voice_assistant:
+  id: va
+
+  microphone:
+    microphone: sticks3_microphone
+    gain_factor: 4
+
+  # THIS IS REQUIRED
+  speaker: sticks3_speaker
+
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+
+  on_start:
+    - logger.log: "Voice assistant started"
+
+  on_stt_end:
+    - script.stop: va_listen_timeout
+    - logger.log:
+        format: "Recognised: %s"
+        args: ['x.c_str()']
+
+  on_tts_start:
+    - script.stop: va_listen_timeout
+    - logger.log:
+        format: "Response: %s"
+        args: ['x.c_str()']
+
+  on_tts_stream_start:
+    - logger.log: "TTS stream started"
+
+  on_tts_stream_end:
+    - logger.log: "TTS stream ended"
+
+  on_idle:
+    - script.stop: va_listen_timeout
+    - logger.log: "VOICE ASSISTANT READY"
+
+  on_error:
+    - script.stop: va_listen_timeout
+    - logger.log:
+        format: "Voice assistant error: %s - %s"
+        args:
+          - 'code.c_str()'
+          - 'message.c_str()'
+
+# ---------------------------------------------------------
+# BUTTONS
+#
+# StickS3:
+# KEY1 = GPIO11
+# KEY2 = GPIO12
+# ---------------------------------------------------------
+
+binary_sensor:
+  - platform: gpio
+    id: push_to_talk
+    name: "Push to Talk"
+
+    pin:
+      number: GPIO11
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+
+    on_press:
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - logger.log: "VA busy - cancelling previous session"
+            - voice_assistant.stop:
+
+            - wait_until:
+                condition:
+                  not:
+                    voice_assistant.is_running:
+                timeout: 2s
+
+            - delay: 100ms
+
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - logger.log: "PTT pressed - starting fresh session"
+
+            - voice_assistant.start:
+                silence_detection: true
+
+            - script.execute: va_listen_timeout
+
+          else:
+            - logger.log: "Voice assistant still busy - start skipped"
+
+    on_release:
+      - logger.log: "PTT released"
+
+script:
+  - id: va_listen_timeout
+    mode: restart
+    then:
+      - delay: 8s
+
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - logger.log: "Voice listening timeout - resetting"
+            - voice_assistant.stop:
+
+# ---------------------------------------------------------
+# MUTE CONTROL
+# ---------------------------------------------------------
+
+switch:
+  - platform: template
+    id: microphone_mute
+    name: "Microphone Mute"
+    icon: mdi:microphone-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+    on_turn_on:
+      # - micro_wake_word.stop:
+      - voice_assistant.stop:
+
+    # on_turn_off:
+      # - micro_wake_word.start:
