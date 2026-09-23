@@ -8,6 +8,14 @@ This project uses the StickS3’s onboard microphone, speaker, ES8311 audio code
 
 <img width="949" height="951" alt="image" src="https://github.com/user-attachments/assets/536d5e49-5646-4e93-a155-34729cb2572e" />
 
+## Available from:
+
+https://shop.m5stack.com/products/m5sticks3-esp32s3-mini-iot-dev-kit
+
+and
+
+https://thepihut.com/products/m5sticks3-esp32s3-mini-iot-dev-kit
+
 ## Features
 
 - Home Assistant Assist voice input
