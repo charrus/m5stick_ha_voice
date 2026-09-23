@@ -142,34 +142,48 @@ esphome:
             // -------------------------------------------------
 
             // GPIO3 function field = bits 7:6
-            update_reg(0x16, 0xC0, false);
+            if (!update_reg(0x16, 0xC0, false)) return;
 
             // GPIO3 -> output
-            update_reg(0x10, 0x08, true);
+            if (!update_reg(0x10, 0x08, true)) return;
 
             // GPIO3 -> push-pull
-            update_reg(0x13, 0x08, false);
+            if (!update_reg(0x13, 0x08, false)) return;
 
             // Initially amplifier OFF
-            update_reg(0x11, 0x08, false);
+            if (!update_reg(0x11, 0x08, false)) return;
+
+            id(pm1_amp_ready) = true;
 
     # This runs after the normal ES8311 setup.
     - priority: 500
       then:
         - lambda: |-
-            auto value = id(m5pm1).read_byte(0x11);
+            if (!id(pm1_amp_ready)) {
+              ESP_LOGW(
+                "sticks3_power",
+                "M5PM1 setup incomplete - speaker amplifier not enabled"
+              );
+              return;
+            }
 
-            if (value.has_value()) {
-              if (id(m5pm1).write_byte(
-                    0x11,
-                    value.value() | 0x08
-                  )) {
+            for (int i = 0; i < 3; i++) {
+              auto value = id(m5pm1).read_byte(0x11);
+              if (value.has_value() &&
+                  id(m5pm1).write_byte(0x11, value.value() | 0x08)) {
                 ESP_LOGI(
                   "sticks3_power",
                   "Speaker amplifier enabled"
                 );
+                return;
               }
+              esphome::delay(5);
             }
+
+            ESP_LOGE(
+              "sticks3_power",
+              "Unable to enable speaker amplifier"
+            );
 
     - priority: -100
       then:
@@ -184,6 +198,13 @@ esp32:
     type: esp-idf
 
 logger:
+
+globals:
+  # Set once the M5PM1 audio rail and amplifier pin are configured
+  - id: pm1_amp_ready
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
 api:
   id: ha_api
@@ -424,33 +445,39 @@ binary_sensor:
     on_press:
       - if:
           condition:
-            voice_assistant.is_running:
+            switch.is_on: microphone_mute
           then:
-            - logger.log: "VA busy - cancelling previous session"
-            - voice_assistant.stop:
+            - logger.log: "Microphone muted - PTT ignored"
+          else:
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                then:
+                  - logger.log: "VA busy - cancelling previous session"
+                  - voice_assistant.stop:
 
-            - wait_until:
+                  - wait_until:
+                      condition:
+                        not:
+                          voice_assistant.is_running:
+                      timeout: 2s
+
+                  - delay: 100ms
+
+            - if:
                 condition:
                   not:
                     voice_assistant.is_running:
-                timeout: 2s
+                then:
+                  - logger.log: "PTT pressed - starting fresh session"
 
-            - delay: 100ms
+                  - voice_assistant.start:
+                      silence_detection: true
 
-      - if:
-          condition:
-            not:
-              voice_assistant.is_running:
-          then:
-            - logger.log: "PTT pressed - starting fresh session"
+                  - script.execute: va_listen_timeout
 
-            - voice_assistant.start:
-                silence_detection: true
-
-            - script.execute: va_listen_timeout
-
-          else:
-            - logger.log: "Voice assistant still busy - start skipped"
+                else:
+                  - logger.log: "Voice assistant still busy - start skipped"
 
     on_release:
       - logger.log: "PTT released"
