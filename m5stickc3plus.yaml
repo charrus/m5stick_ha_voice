@@ -2,6 +2,27 @@ substitutions:
   name: m5sticks3-voice
   friendly_name: "M5StickS3 Voice"
 
+globals:
+  # Set once the M5PM1 audio rail and amplifier pin are configured
+  - id: pm1_amp_ready
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: va_screen_state
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: last_heard
+    type: std::string
+    restore_value: no
+    initial_value: '" "'
+
+  - id: last_error
+    type: std::string
+    restore_value: no
+    initial_value: '" "'
+
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
@@ -189,7 +210,7 @@ esphome:
       then:
         - audio_dac.set_volume:
             id: es8311_dac
-            volume: 65%
+            volume: 80%
 
 esp32:
   variant: esp32s3
@@ -199,12 +220,7 @@ esp32:
 
 logger:
 
-globals:
-  # Set once the M5PM1 audio rail and amplifier pin are configured
-  - id: pm1_amp_ready
-    type: bool
-    restore_value: no
-    initial_value: "false"
+
 
 api:
   id: ha_api
@@ -331,8 +347,8 @@ speaker:
     bits_per_sample: 16bit
     channel: left
 
-    buffer_duration: 500ms
-    timeout: 1s
+    buffer_duration: 1s
+    timeout: 3s
 
 # media_player:
 #   - platform: speaker
@@ -379,44 +395,46 @@ voice_assistant:
     microphone: sticks3_microphone
     gain_factor: 4
 
-  # THIS IS REQUIRED
   speaker: sticks3_speaker
 
   noise_suppression_level: 2
   auto_gain: 31dBFS
 
-  on_start:
-    - logger.log: "Voice assistant started"
+  on_listening:
+    - lambda: |-
+        id(va_screen_state) = 1;
+    - component.update: sticks3_display
 
   on_stt_end:
     - script.stop: va_listen_timeout
-    - logger.log:
-        format: "Recognised: %s"
-        args: ['x.c_str()']
+    - lambda: |-
+        id(last_heard) = x;
+        id(va_screen_state) = 2;
+    - component.update: sticks3_display
+
+  on_intent_start:
+    - lambda: |-
+        id(va_screen_state) = 3;
+    - component.update: sticks3_display
 
   on_tts_start:
-    - script.stop: va_listen_timeout
-    - logger.log:
-        format: "Response: %s"
-        args: ['x.c_str()']
-
-  on_tts_stream_start:
-    - logger.log: "TTS stream started"
-
-  on_tts_stream_end:
-    - logger.log: "TTS stream ended"
-
-  on_idle:
-    - script.stop: va_listen_timeout
-    - logger.log: "VOICE ASSISTANT READY"
+    - lambda: |-
+        id(va_screen_state) = 4;
+    - component.update: sticks3_display
 
   on_error:
     - script.stop: va_listen_timeout
-    - logger.log:
-        format: "Voice assistant error: %s - %s"
-        args:
-          - 'code.c_str()'
-          - 'message.c_str()'
+    - lambda: |-
+        id(last_error) = code;
+        id(va_screen_state) = 5;
+    - component.update: sticks3_display
+
+  on_idle:
+    - script.stop: va_listen_timeout
+    - delay: 1500ms
+    - lambda: |-
+        id(va_screen_state) = 0;
+    - component.update: sticks3_display
 
 # ---------------------------------------------------------
 # BUTTONS
@@ -513,3 +531,111 @@ switch:
 
     # on_turn_off:
       # - micro_wake_word.start:
+
+spi:
+  id: display_spi
+  clk_pin: GPIO40
+  mosi_pin: GPIO39
+
+output:
+  - platform: gpio
+    id: lcd_backlight_output
+    pin: GPIO38
+
+light:
+  - platform: binary
+    id: lcd_backlight
+    output: lcd_backlight_output
+    restore_mode: ALWAYS_ON
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 16
+
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 26
+
+display:
+  - platform: mipi_spi
+    id: sticks3_display
+
+    # Use the ESPHome ST7789V driver for the StickS3 ST7789P3
+    model: ST7789V
+
+    spi_id: display_spi
+    cs_pin: GPIO41
+    dc_pin: GPIO45
+    reset_pin: GPIO21
+
+    data_rate: 20MHz
+
+    dimensions:
+      width: 135
+      height: 240
+      offset_width: 52
+      offset_height: 40
+
+    rotation: 90
+
+    update_interval: never
+
+    invert_colors: true
+
+    lambda: |-
+      it.fill(Color(0, 0, 0));
+
+      switch (id(va_screen_state)) {
+        case 0:
+          // Ready
+          it.filled_circle(120, 35, 16, Color(100, 100, 100));
+          it.printf(120, 65, id(font_large),
+                    TextAlign::TOP_CENTER, "READY");
+          break;
+
+        case 1:
+          // Listening
+          it.filled_circle(120, 35, 16, Color(0, 120, 255));
+          it.printf(120, 65, id(font_large),
+                    TextAlign::TOP_CENTER, "LISTENING");
+          break;
+
+        case 2:
+          // STT understood the speech
+          it.filled_circle(120, 35, 16, Color(255, 170, 0));
+          it.printf(120, 62, id(font_large),
+                    TextAlign::TOP_CENTER, "HEARD");
+
+          it.printf(120, 100, id(font_small),
+                    TextAlign::TOP_CENTER,
+                    "%s",
+                    id(last_heard).c_str());
+          break;
+
+        case 3:
+          // Intent processing
+          it.filled_circle(120, 35, 16, Color(255, 170, 0));
+          it.printf(120, 65, id(font_large),
+                    TextAlign::TOP_CENTER, "THINKING");
+          break;
+
+        case 4:
+          // Success
+          it.filled_circle(120, 35, 16, Color(0, 210, 60));
+          it.printf(120, 65, id(font_large),
+                    TextAlign::TOP_CENTER, "OK");
+          break;
+
+        case 5:
+          // Error
+          it.filled_circle(120, 35, 16, Color(230, 30, 30));
+          it.printf(120, 62, id(font_large),
+                    TextAlign::TOP_CENTER, "FAILED");
+
+          it.printf(120, 100, id(font_small),
+                    TextAlign::TOP_CENTER,
+                    "%s",
+                    id(last_error).c_str());
+          break;
+      }
