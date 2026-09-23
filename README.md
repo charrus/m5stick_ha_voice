@@ -27,7 +27,10 @@ https://thepihut.com/products/m5sticks3-esp32s3-mini-iot-dev-kit
 - Hardware push/tap-to-talk button on GPIO11
 - Voice activity detection
 - Local TTS playback through the onboard speaker
-- Speaker output tuned to avoid clipping
+- Speaker output tuned for loud, clean playback (80% DAC volume)
+- Larger speaker buffer so long TTS replies are not cut off
+- Colour-coded status display on the built-in LCD (Ready / Listening / Heard / Thinking / OK / Failed)
+- Recognised speech and error codes shown on screen
 - Automatic recovery from stale voice-assistant sessions
 - OTA updates
 
@@ -48,6 +51,19 @@ This project targets the **M5Stack StickS3** based on the ESP32-S3.
 | ESP32 → ES8311 speaker data | 14 |
 | Main button / PTT | 11 |
 | Secondary button | 12 |
+
+### Display pins
+
+The built-in 135×240 ST7789P3 LCD is driven over SPI.
+
+| Function | GPIO |
+|---|---:|
+| SPI CLK | 40 |
+| SPI MOSI | 39 |
+| LCD CS | 41 |
+| LCD DC | 45 |
+| LCD RESET | 21 |
+| LCD backlight | 38 |
 
 ### I2C devices
 
@@ -207,20 +223,22 @@ speaker:
     bits_per_sample: 16bit
     channel: left
 
-    buffer_duration: 500ms
-    timeout: 1s
+    buffer_duration: 1s
+    timeout: 3s
 ```
+
+The larger `buffer_duration` and `timeout` stop longer TTS responses from being truncated. With `500ms` / `1s` the speaker could time out mid-reply and cut off the end of the response.
 
 ### Speaker volume
 
-The default ES8311 output level was too aggressive on the StickS3 and produced audible clipping.
+The default ES8311 output level was too aggressive on the StickS3 and produced audible clipping, while 65% was on the quiet side.
 
-A DAC level of **65%** has produced clean playback during testing:
+A DAC level of **80%** gives a good balance of loudness and clean playback:
 
 ```yaml
 - audio_dac.set_volume:
     id: es8311_dac
-    volume: 65%
+    volume: 80%
 ```
 
 ## Voice Assistant
@@ -263,6 +281,47 @@ TTS stream end
 Speaker has finished outputting all audio
 State changed from RESPONSE_FINISHED to IDLE
 ```
+
+## Display feedback
+
+The StickS3's built-in LCD shows the current Voice Assistant state as a coloured indicator with a label, so you can see what the device is doing without watching the logs.
+
+| State | Indicator | Label | Extra text |
+|---|---|---|---|
+| Idle | Grey | `READY` | |
+| Listening | Blue | `LISTENING` | |
+| Speech recognised | Amber | `HEARD` | Recognised text |
+| Intent processing | Amber | `THINKING` | |
+| Response playing | Green | `OK` | |
+| Error | Red | `FAILED` | Error code |
+
+The state is held in a `va_screen_state` global and set from the Voice Assistant triggers (`on_listening`, `on_stt_end`, `on_intent_start`, `on_tts_start`, `on_error`, `on_idle`). Each trigger calls `component.update: sticks3_display`, so the display uses `update_interval: never` and only redraws when something changes.
+
+After returning to idle, the last state stays on screen for 1.5 s before switching back to `READY`, so the final `OK` or `FAILED` remains visible briefly.
+
+The display uses the `mipi_spi` platform with the `ST7789V` model:
+
+```yaml
+display:
+  - platform: mipi_spi
+    id: sticks3_display
+    model: ST7789V
+    spi_id: display_spi
+    cs_pin: GPIO41
+    dc_pin: GPIO45
+    reset_pin: GPIO21
+    data_rate: 20MHz
+    dimensions:
+      width: 135
+      height: 240
+      offset_width: 52
+      offset_height: 40
+    rotation: 90
+    update_interval: never
+    invert_colors: true
+```
+
+Fonts are downloaded from Google Fonts (Roboto at 16 px and 26 px), so the first compile needs internet access.
 
 ## Button control
 
@@ -332,7 +391,7 @@ script:
             - voice_assistant.stop:
 ```
 
-Stop that watchdog after successful recognition, TTS or return to idle.
+Stop that watchdog after successful recognition, an error or return to idle.
 
 ## Home Assistant
 
@@ -356,8 +415,7 @@ Example:
 wifi_ssid: "YOUR_WIFI"
 wifi_password: "YOUR_PASSWORD"
 
-api_encryption_key: "YOUR_API_KEY"
-ota_password: "YOUR_OTA_PASSWORD"
+ha_api_pw: "YOUR_API_ENCRYPTION_KEY"
 ```
 
 Then reference them from the main configuration:
@@ -382,19 +440,19 @@ secrets.yaml
 Validate:
 
 ```bash
-esphome config m5stack.yaml
+esphome config m5stickc3plus.yaml
 ```
 
 Compile:
 
 ```bash
-esphome compile m5stack.yaml
+esphome compile m5stickc3plus.yaml
 ```
 
 Initial flash over USB:
 
 ```bash
-esphome run m5stack.yaml
+esphome run m5stickc3plus.yaml
 ```
 
 After the first installation, OTA can be used normally.
@@ -470,15 +528,21 @@ Also make sure microphone and speaker I2S clocking are compatible.
 
 ### Speaker audio clips
 
-Reduce the ES8311 DAC volume.
-
-65% has worked well during development:
+Reduce the ES8311 DAC volume. The default is 80%. If you hear distortion, 65% is a safe fallback:
 
 ```yaml
 - audio_dac.set_volume:
     id: es8311_dac
     volume: 65%
 ```
+
+### TTS response is cut off
+
+Increase the speaker `buffer_duration` and `timeout`. Setting them to `1s` and `3s` fixed truncated replies during testing.
+
+### Display is blank
+
+Check that the backlight (`GPIO38`) is on and the SPI pins match the table above. If the image is offset or the colours look wrong, check `offset_width`, `offset_height` and `invert_colors`.
 
 ### Second button press does nothing
 
@@ -511,14 +575,13 @@ A small ESPHome patch or future upstream change may make true release-to-send po
 
 ## Repository layout
 
-Suggested layout:
+Current layout (`secrets.yaml` is not committed):
 
 ```text
 .
 ├── README.md
-├── m5stack.yaml
-├── secrets.example.yaml
-└── .gitignore
+├── LICENSE
+└── m5stickc3plus.yaml
 ```
 
 ## Status
@@ -535,7 +598,9 @@ Working:
 - [x] Assist intent processing
 - [x] TTS streaming
 - [x] Onboard speaker
-- [x] Clean speaker output at 65%
+- [x] Clean speaker output at 80%
+- [x] Full-length TTS replies (no truncation)
+- [x] Colour-coded display feedback
 - [x] Repeated Assist sessions
 - [x] OTA updates
 
@@ -543,7 +608,6 @@ Still being refined:
 
 - [ ] True release-to-send PTT behavior
 - [ ] Wake-word mode
-- [ ] Display/UI feedback
 - [ ] Battery status
 - [ ] Secondary button behavior
 
