@@ -295,9 +295,9 @@ The StickS3's built-in LCD shows the current Voice Assistant state as a coloured
 | Response playing | Green | `OK` | |
 | Error | Red | `FAILED` | Error code |
 
-The state is held in a `va_screen_state` global and set from the Voice Assistant triggers (`on_listening`, `on_stt_end`, `on_intent_start`, `on_tts_start`, `on_error`, `on_idle`). Each trigger calls `component.update: sticks3_display`, so the display uses `update_interval: never` and only redraws when something changes.
+The state is held in a `va_screen_state` global and set from the Voice Assistant triggers (`on_listening`, `on_stt_end`, `on_intent_start`, `on_tts_start`, `on_error`, `on_end`). Each trigger calls `component.update: sticks3_display`, so the display uses `update_interval: never` and only redraws when something changes.
 
-After returning to idle, the last state stays on screen for 1.5 s before switching back to `READY`, so the final `OK` or `FAILED` remains visible briefly.
+When the pipeline ends, `on_end` waits for the reply to finish playing. The last state then stays on screen for 1.5 s before switching back to `READY`, so the final `OK` or `FAILED` remains visible briefly. `on_idle` is not used because in ESPHome 2026.9.0 it only fires in continuous (wake word) mode.
 
 The display uses the `mipi_spi` platform with the `ST7789V` model:
 
@@ -391,7 +391,7 @@ script:
             - voice_assistant.stop:
 ```
 
-Stop that watchdog after successful recognition, an error or return to idle.
+Stop that watchdog after successful recognition, an error or the end of the pipeline (`on_end`). If the watchdog fires, the display shows `FAILED` with `timeout` before returning to `READY`.
 
 ## Home Assistant
 
@@ -579,6 +579,8 @@ Current layout (`secrets.yaml` is not committed):
 
 ```text
 .
+├── .gitignore
+├── CLAUDE.md
 ├── README.md
 ├── LICENSE
 └── m5stickc3plus.yaml
