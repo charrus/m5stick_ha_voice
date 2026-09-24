@@ -447,21 +447,29 @@ binary_sensor:
                 condition:
                   voice_assistant.is_running:
                 then:
-                  - logger.log: "VA busy - cancelling previous session"
+                  - logger.log: "VA busy - requesting stop and waiting for audio to finish"
                   - voice_assistant.stop:
 
-                  - wait_until:
-                      condition:
-                        not:
-                          voice_assistant.is_running:
-                      timeout: 2s
-
-                  - delay: 100ms
+            # In ESPHome 2026.9.0, stop does not interrupt RESPONSE_FINISHED.
+            # Allow buffered audio plus the speaker's 3s idle timeout to finish.
+            # This resumes as soon as both are ready; it is not a fixed delay.
+            - wait_until:
+                condition:
+                  and:
+                    - not:
+                        voice_assistant.is_running:
+                    - speaker.is_stopped: sticks3_speaker
+                timeout: 6s
 
             - if:
                 condition:
-                  not:
-                    voice_assistant.is_running:
+                  and:
+                    - not:
+                        voice_assistant.is_running:
+                    - speaker.is_stopped: sticks3_speaker
+                    # Mute or connection state may change while waiting.
+                    - switch.is_off: microphone_mute
+                    - voice_assistant.connected:
                 then:
                   - logger.log: "PTT pressed - starting fresh session"
 
@@ -471,7 +479,7 @@ binary_sensor:
                   - script.execute: va_listen_timeout
 
                 else:
-                  - logger.log: "Voice assistant still busy - start skipped"
+                  - logger.log: "PTT start skipped - still busy, muted, or disconnected"
 
     on_release:
       - logger.log: "PTT released"
